@@ -1,0 +1,20 @@
+[project]
+name = "monitor-log-agent"
+version = "0.1.0"
+description = "Analyze the latest ms-controller monitor_log with Claude Agent SDK"
+authors = [
+    { name = "muming.zhouxi", email = "muming.zhouxi@smartx.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "claude-agent-sdk>=0.2.152",
+    "paramiko>=3.5.0",
+    "python-dotenv>=1.0.1",
+]
+
+[project.scripts]
+monitor-log-agent = "monitor_log_agent.analyze:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
