@@ -18,6 +18,7 @@ class FetchLatestLogReq:
     service_id: int
     lookback_days: int = 14
     timeout_sec: int = 20
+    day: str | None = None
 
 
 @dataclass
@@ -46,7 +47,26 @@ class NormalizeDayReq:
     raw: str
 
 
+@dataclass
+class FetchDayLatestReq:
+    parent: FetchLatestLogReq
+    day: str
+
+
 def fetch_latest_log(req: FetchLatestLogReq) -> MonitorLog | None:
+    if req.day:
+        day = normalize_day(NormalizeDayReq(raw=req.day))
+        days = [day] if day else []
+    else:
+        days = _lookback_days(req)
+    for day in days:
+        log = _fetch_day_latest(FetchDayLatestReq(parent=req, day=day))
+        if log is not None:
+            return log
+    return None
+
+
+def _lookback_days(req: FetchLatestLogReq) -> list[str]:
     end = date.today()
     start = end - timedelta(days=req.lookback_days)
     summary = _post_json(
@@ -65,20 +85,24 @@ def fetch_latest_log(req: FetchLatestLogReq) -> MonitorLog | None:
     days = sorted(set(day for day in days if day), reverse=True)
     if not days:
         days = [(end - timedelta(days=offset)).isoformat() for offset in range(req.lookback_days + 1)]
+    return days
 
-    for day in days:
-        payload = _post_json(
-            PostJsonReq(
-                url=f"{req.api_base}/monitor-log/logs",
-                token=req.token,
-                body={"day": day, "service_id": req.service_id, "log_id": req.log_id},
-                timeout_sec=req.timeout_sec,
-            )
+
+def _fetch_day_latest(req: FetchDayLatestReq) -> MonitorLog | None:
+    parent = req.parent
+    payload = _post_json(
+        PostJsonReq(
+            url=f"{parent.api_base}/monitor-log/logs",
+            token=parent.token,
+            body={"day": req.day, "service_id": parent.service_id, "log_id": parent.log_id},
+            timeout_sec=parent.timeout_sec,
         )
-        logs = payload.get("logs") or []
-        if logs:
-            return _to_monitor_log(logs[0])
-    return None
+    )
+    logs = payload.get("logs") or []
+    if not logs:
+        return None
+    logs = sorted(logs, key=lambda row: int(row.get("id") or 0), reverse=True)
+    return _to_monitor_log(logs[0])
 
 
 def normalize_day(req: NormalizeDayReq) -> str:

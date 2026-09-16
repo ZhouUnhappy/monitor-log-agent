@@ -31,16 +31,31 @@ from monitor_log_agent.tools import (
 @dataclass
 class AnalyzeLatestReq:
     config: AppConfig
+    day: str | None = None
+    html_name: str | None = None
+    resume: str | None = None
+    follow_up: str | None = None
 
 
 @dataclass
 class AnalyzeLatestRes:
-    html_path: Path
+    html_path: Path | None
     result: str
+    log: MonitorLog | None = None
+    error: str = ""
+    session_id: str = ""
+
+
+@dataclass
+class HtmlNameReq:
+    day: str | None
+    log: MonitorLog
 
 
 def main() -> None:
-    asyncio.run(analyze_latest(AnalyzeLatestReq(config=load_config())))
+    res = asyncio.run(analyze_latest(AnalyzeLatestReq(config=load_config())))
+    if res.html_path is None:
+        raise RuntimeError(res.error or "no monitor_log")
 
 
 async def analyze_latest(req: AnalyzeLatestReq) -> AnalyzeLatestRes:
@@ -60,12 +75,23 @@ async def analyze_latest(req: AnalyzeLatestReq) -> AnalyzeLatestRes:
             log_id=cfg.log_id,
             service_id=cfg.service_id,
             lookback_days=cfg.lookback_days,
+            day=req.day,
         )
     )
     if log is None:
-        raise RuntimeError(f"no monitor_log from API for log_id={cfg.log_id} service_id={cfg.service_id}")
+        day_hint = req.day or f"log_id={cfg.log_id} service_id={cfg.service_id}"
+        return AnalyzeLatestRes(
+            html_path=None,
+            result="",
+            error=f"没有找到 {day_hint} 的 ms-controller 日志",
+        )
     if not log.service_ip:
-        raise RuntimeError(f"monitor_log id={log.id} has empty service_ip")
+        return AnalyzeLatestRes(
+            html_path=None,
+            result="",
+            log=log,
+            error=f"monitor_log id={log.id} has empty service_ip",
+        )
 
     print(f"latest ms-controller log id={log.id} day={log.day} host={log.service_ip}")
     print(log.log[:500])
@@ -83,12 +109,20 @@ async def analyze_latest(req: AnalyzeLatestReq) -> AnalyzeLatestRes:
     events: list[TranscriptEvent] = []
     result_text = ""
     result_error = ""
+    session_id = ""
 
+    prompt = (
+        _build_follow_up_prompt(log, req.follow_up, cfg.er_controller_ssh.usernames)
+        if req.follow_up
+        else _build_prompt(log, sync.commit, sync.message, cfg.er_controller_ssh.usernames)
+    )
     async for message in query(
-        prompt=_build_prompt(log, sync.commit, sync.message, cfg.er_controller_ssh.usernames),
-        options=_build_options(cfg),
+        prompt=prompt,
+        options=_build_options(cfg, resume=req.resume),
     ):
         _collect_event(events, message)
+        if getattr(message, "session_id", None):
+            session_id = str(message.session_id)
         if isinstance(message, AssistantMessage):
             for block in message.content:
                 if isinstance(block, TextBlock) and block.text.strip():
@@ -104,9 +138,10 @@ async def analyze_latest(req: AnalyzeLatestReq) -> AnalyzeLatestRes:
                 print("\n===== result =====\n")
                 print(result_text)
 
+    html_name = req.html_name or _html_name(HtmlNameReq(day=req.day, log=log))
     html_path = write_html_report(
         WriteHtmlReq(
-            output_path=cfg.output_dir / "latest.html",
+            output_path=cfg.output_dir / html_name,
             log=log,
             events=events,
             result=result_text,
@@ -115,7 +150,20 @@ async def analyze_latest(req: AnalyzeLatestReq) -> AnalyzeLatestRes:
         )
     )
     print(f"\nhtml: {html_path}")
-    return AnalyzeLatestRes(html_path=html_path, result=result_text)
+    return AnalyzeLatestRes(
+        html_path=html_path,
+        result=result_text,
+        log=log,
+        error=result_error,
+        session_id=session_id,
+    )
+
+
+def _html_name(req: HtmlNameReq) -> str:
+    if req.day is None:
+        return "latest.html"
+    day = req.day.replace("/", "-")
+    return f"ms-controller-{day}-{req.log.id}.html"
 
 
 def _build_prompt(log: MonitorLog, commit: str, sync_message: str, ssh_usernames: tuple[str, ...]) -> str:
@@ -143,7 +191,26 @@ monitor_log:
 """
 
 
-def _build_options(cfg: AppConfig) -> ClaudeAgentOptions:
+def _build_follow_up_prompt(log: MonitorLog, question: str, ssh_usernames: tuple[str, ...]) -> str:
+    names = "、".join(ssh_usernames)
+    return f"""这是同一条 ms-controller（log_id=12）排查的追问。继续按 skill `ms-controller-triage` 做。
+
+不要改任何文件，不要改 skill，不要用 Bash。现场信息只用 ssh_read，且 host 只能是这条日志的 service_ip。
+SSH 目标是 **ER controller**（service_id=2）。运行时按用户名列表 [{names}] 顺序尝试，密码不要出现在 tool 参数里。
+
+monitor_log:
+- id: {log.id}
+- day: {log.day}
+- service_ip: {log.service_ip}
+
+追问：
+{question}
+
+最终用中文给出更新后的：结论、可能根因、代码线索、现场证据、建议（加白名单 / 真 bug / 需人工）。
+"""
+
+
+def _build_options(cfg: AppConfig, resume: str | None = None) -> ClaudeAgentOptions:
     env = {
         "CLAUDE_AGENT_SDK_CLIENT_APP": "monitor-log-agent/0.1.0",
         **cfg.anthropic_env,
@@ -162,6 +229,7 @@ def _build_options(cfg: AppConfig) -> ClaudeAgentOptions:
         max_turns=20,
         max_budget_usd=5,
         model=cfg.anthropic_model,
+        resume=resume,
         system_prompt={
             "type": "preset",
             "preset": "claude_code",

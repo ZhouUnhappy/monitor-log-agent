@@ -10,10 +10,11 @@ dependencies = [
     "claude-agent-sdk>=0.2.152",
     "paramiko>=3.5.0",
     "python-dotenv>=1.0.1",
+    "slack-bolt>=1.30.0",
 ]
 
 [project.scripts]
-monitor-log-agent = "monitor_log_agent.analyze:main"
+monitor-log-agent = "monitor_log_agent.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.12.13,<0.13.0"]

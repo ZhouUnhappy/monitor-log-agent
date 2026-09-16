@@ -1,4 +1,4 @@
-from monitor_log_agent.analyze import main
+from monitor_log_agent.cli import main
 
 if __name__ == "__main__":
     main()

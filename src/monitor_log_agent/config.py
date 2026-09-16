@@ -35,6 +35,14 @@ class ErControllerSsh:
 class ParseStringListReq:
     raw: str
     fallback: tuple[str, ...]
+    label: str = "value"
+
+
+@dataclass
+class SlackConfig:
+    bot_token: str
+    app_token: str
+    channel_ids: frozenset[str]
 
 
 @dataclass
@@ -62,7 +70,11 @@ def load_config() -> AppConfig:
 
     anthropic_env = _load_anthropic_env()
     usernames = parse_string_list(
-        ParseStringListReq(raw=os.getenv("ER_CONTROLLER_SSH_USERNAMES", ""), fallback=())
+        ParseStringListReq(
+            raw=os.getenv("ER_CONTROLLER_SSH_USERNAMES", ""),
+            fallback=(),
+            label="ER_CONTROLLER_SSH_USERNAMES",
+        )
     )
     password = os.getenv("ER_CONTROLLER_SSH_PASSWORD", "").strip()
     if not usernames:
@@ -89,6 +101,37 @@ def load_config() -> AppConfig:
     )
 
 
+def load_slack_config() -> SlackConfig:
+    load_dotenv(AGENT_ROOT / ".env")
+    bot_token = os.getenv("SLACK_BOT_TOKEN", "").strip()
+    app_token = os.getenv("SLACK_APP_TOKEN", "").strip() or os.getenv("SLACK_APP_LEVEL_TOKEN", "").strip()
+    channel_ids = parse_string_list(
+        ParseStringListReq(
+            raw=os.getenv("SLACK_CHANNEL_IDS", ""),
+            fallback=(),
+            label="SLACK_CHANNEL_IDS",
+        )
+    )
+    if not bot_token:
+        raise ValueError("SLACK_BOT_TOKEN is empty")
+    if not bot_token.startswith("xoxb-"):
+        raise ValueError("SLACK_BOT_TOKEN should start with xoxb-")
+    if not app_token:
+        raise ValueError("SLACK_APP_TOKEN or SLACK_APP_LEVEL_TOKEN is empty")
+    if not app_token.startswith("xapp-"):
+        raise ValueError("Slack app-level token should start with xapp-")
+    if not channel_ids:
+        raise ValueError("SLACK_CHANNEL_IDS is empty; add channel IDs like C0123456789")
+    bad = [item for item in channel_ids if not _is_slack_channel_id(item)]
+    if bad:
+        raise ValueError(f"SLACK_CHANNEL_IDS must be Slack IDs (C…/G…), not names: {bad}")
+    return SlackConfig(
+        bot_token=bot_token,
+        app_token=app_token,
+        channel_ids=frozenset(channel_ids),
+    )
+
+
 def parse_string_list(req: ParseStringListReq) -> tuple[str, ...]:
     raw = req.raw.strip()
     if not raw:
@@ -96,11 +139,17 @@ def parse_string_list(req: ParseStringListReq) -> tuple[str, ...]:
     if raw.startswith("["):
         parsed = json.loads(raw)
         if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
-            raise ValueError("ER_CONTROLLER_SSH_USERNAMES must be a JSON array of strings")
+            raise ValueError(f"{req.label} must be a JSON array of strings")
         names = tuple(item.strip() for item in parsed if item.strip())
     else:
         names = tuple(item.strip() for item in raw.split(",") if item.strip())
     return names or req.fallback
+
+
+def _is_slack_channel_id(value: str) -> bool:
+    if len(value) < 9:
+        return False
+    return value[0] in {"C", "G"} and value[1:].isalnum()
 
 
 def _load_anthropic_env() -> dict[str, str]:
