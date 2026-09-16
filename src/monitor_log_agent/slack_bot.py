@@ -4,7 +4,7 @@ import asyncio
 import logging
 import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -22,6 +22,7 @@ from monitor_log_agent.slack_sessions import (
     PutSessionReq,
     SlackSessionStore,
 )
+from monitor_log_agent.slack_thread import LoadThreadReq, load_thread
 
 SLACK_TEXT_LIMIT = 8000
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -44,6 +45,7 @@ class HandleMentionReq:
     lock: threading.Lock
     sessions: SlackSessionStore
     dedupe: EventDedupe
+    bot_user_id: str
 
 
 @dataclass
@@ -59,6 +61,7 @@ def run_slack(req: RunSlackReq) -> None:
     sessions = SlackSessionStore()
     dedupe = EventDedupe()
     app = App(token=req.slack.bot_token)
+    bot_user_id = str(app.client.auth_test()["user_id"])
 
     @app.middleware
     def log_incoming(body, logger, next):
@@ -86,6 +89,7 @@ def run_slack(req: RunSlackReq) -> None:
                 lock=lock,
                 sessions=sessions,
                 dedupe=dedupe,
+                bot_user_id=bot_user_id,
             )
         )
 
@@ -124,13 +128,29 @@ def handle_mention(req: HandleMentionReq) -> None:
         return
 
     existing = req.sessions.get(GetSessionReq(channel=channel, thread_ts=thread_ts, now=now))
+    thread = load_thread(
+        LoadThreadReq(
+            client=req.client,
+            channel=channel,
+            thread_ts=thread_ts,
+            event_ts=str(event.get("ts") or ""),
+            bot_user_id=req.bot_user_id,
+        )
+    )
+    if thread.error:
+        req.logger.info("load thread failed: %s", thread.error)
     follow_up = None
     day = parsed.day
+    inferred = False
     if parsed.day:
         follow_up = None
     elif existing is not None:
         follow_up = mention_body(str(event.get("text") or "")) or "请继续排查并补充结论。"
         day = existing.day
+    elif thread.day:
+        day = thread.day
+        inferred = True
+        req.logger.info("inferred day=%s source=%s host=%s", thread.day, thread.day_source, thread.host)
     else:
         reply(USAGE)
         return
@@ -142,6 +162,8 @@ def handle_mention(req: HandleMentionReq) -> None:
     with req.lock:
         if follow_up:
             start = f"收到，继续排查 {day} 的那条 ms-controller 日志。"
+        elif thread.host:
+            start = f"收到，正在分析 {day} host={thread.host} 的 ms-controller 日志。"
         else:
             start = f"收到，正在分析 {day} 的最近一条 ms-controller 日志。"
         if queued:
@@ -156,9 +178,26 @@ def handle_mention(req: HandleMentionReq) -> None:
                         day=day,
                         resume=existing.session_id if follow_up and existing is not None else None,
                         follow_up=follow_up,
+                        slack_context=thread.excerpt,
+                        preferred_host=thread.host,
                     )
                 )
             )
+            if inferred and result.log is None and day:
+                prev = (date.fromisoformat(day) - timedelta(days=1)).isoformat()
+                req.logger.info("no log for %s, retry %s", day, prev)
+                reply(f"{day} 没有日志，改试 {prev}。")
+                day = prev
+                result = asyncio.run(
+                    analyze_latest(
+                        AnalyzeLatestReq(
+                            config=req.config,
+                            day=day,
+                            slack_context=thread.excerpt,
+                            preferred_host=thread.host,
+                        )
+                    )
+                )
         except Exception as exc:
             req.logger.exception("analyze failed")
             if follow_up:

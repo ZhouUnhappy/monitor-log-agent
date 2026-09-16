@@ -35,6 +35,8 @@ class AnalyzeLatestReq:
     html_name: str | None = None
     resume: str | None = None
     follow_up: str | None = None
+    slack_context: str = ""
+    preferred_host: str | None = None
 
 
 @dataclass
@@ -76,6 +78,7 @@ async def analyze_latest(req: AnalyzeLatestReq) -> AnalyzeLatestRes:
             service_id=cfg.service_id,
             lookback_days=cfg.lookback_days,
             day=req.day,
+            preferred_host=req.preferred_host,
         )
     )
     if log is None:
@@ -114,7 +117,7 @@ async def analyze_latest(req: AnalyzeLatestReq) -> AnalyzeLatestRes:
     prompt = (
         _build_follow_up_prompt(log, req.follow_up, cfg.er_controller_ssh.usernames)
         if req.follow_up
-        else _build_prompt(log, sync.commit, sync.message, cfg.er_controller_ssh.usernames)
+        else _build_prompt(log, sync.commit, sync.message, cfg.er_controller_ssh.usernames, req.slack_context)
     )
     async for message in query(
         prompt=prompt,
@@ -166,14 +169,23 @@ def _html_name(req: HtmlNameReq) -> str:
     return f"ms-controller-{day}-{req.log.id}.html"
 
 
-def _build_prompt(log: MonitorLog, commit: str, sync_message: str, ssh_usernames: tuple[str, ...]) -> str:
+def _build_prompt(
+    log: MonitorLog,
+    commit: str,
+    sync_message: str,
+    ssh_usernames: tuple[str, ...],
+    slack_context: str = "",
+) -> str:
     names = "、".join(ssh_usernames)
+    slack = ""
+    if slack_context.strip():
+        slack = f"\nSlack 告警线程（宿主已取，日期和日志行已选定）：\n{slack_context}\n"
     return f"""排查下面这条 ms-controller（log_id=12）错误日志。先按 skill `ms-controller-triage` 做。
 
 不要改任何文件，不要改 skill，不要用 Bash。现场信息只用 ssh_read，且 host 只能是这条日志的 service_ip。
 SSH 目标是 **ER controller**（service_id=2）。运行时按用户名列表 [{names}] 顺序尝试，密码不要出现在 tool 参数里。
 源码在已挂载的 everoute 仓库，当前 commit {commit}（{sync_message}）。进程名在代码里是 everoute-controller。
-
+{slack}
 monitor_log:
 - id: {log.id}
 - day: {log.day}

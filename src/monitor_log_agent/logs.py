@@ -19,6 +19,7 @@ class FetchLatestLogReq:
     lookback_days: int = 14
     timeout_sec: int = 20
     day: str | None = None
+    preferred_host: str | None = None
 
 
 @dataclass
@@ -102,6 +103,12 @@ def _fetch_day_latest(req: FetchDayLatestReq) -> MonitorLog | None:
     if not logs:
         return None
     logs = sorted(logs, key=lambda row: int(row.get("id") or 0), reverse=True)
+    want = (parent.preferred_host or "").strip()
+    if want:
+        for row in logs:
+            ip = str(row.get("service_ip") or "")
+            if ip == want:
+                return _to_monitor_log(row)
     return _to_monitor_log(logs[0])
 
 
