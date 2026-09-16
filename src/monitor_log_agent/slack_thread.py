@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from monitor_log_agent.slack_mention import ISO_DATE_RE, MENTION_RE
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+URL_RE = re.compile(r"https?://\S+", re.I)
 DOT_IP_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
 DASH_IP_RE = re.compile(r"(?<![\d])(\d{1,3}(?:-\d{1,3}){3})(?![\d])")
 STATUS_PREFIXES = (
@@ -96,13 +97,14 @@ def _day_from_slack_ts(ts: str) -> str:
 
 
 def _extract_host(text: str) -> str | None:
-    dotted = [item for item in DOT_IP_RE.findall(text) if _valid_ipv4(item)]
-    if dotted:
-        return dotted[0]
-    for raw in DASH_IP_RE.findall(text):
+    stripped = URL_RE.sub(" ", text)
+    for raw in DASH_IP_RE.findall(stripped):
         ip = raw.replace("-", ".")
         if _valid_ipv4(ip):
             return ip
+    dotted = [item for item in DOT_IP_RE.findall(stripped) if _valid_ipv4(item)]
+    if dotted:
+        return dotted[0]
     return None
 
 
